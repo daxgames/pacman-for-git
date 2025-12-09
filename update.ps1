@@ -1,6 +1,5 @@
 param(
-    [string] $Version,
-    [int] $RecentCount = 10
+    [string] $Version
 )
 
 Set-StrictMode -Version Latest
@@ -36,31 +35,19 @@ if ($PackageLine -notmatch '^mingw-w64-x86_64-git\s+(.+)$') {
     Write-Error "Package line must start with 'mingw-w64-x86_64-git '"
     exit 5
 }
-$version = $Matches[1].Trim()
-$line64 = "mingw-w64-x86_64-git $version"
-$line32 = "mingw-w64-i686-git $version"
-
-# Try to derive a simpler version token to find the release (numeric prefix)
-if ($version -match '^(\d+(?:\.\d+)+)') { $simpleVer = $Matches[1] } else { $simpleVer = $version }
+$versionLong = $Matches[1].Trim()
+$line64 = "mingw-w64-x86_64-git $versionLong"
+$line32 = "mingw-w64-i686-git $versionLong"
 
 # Find candidate releases in git-for-windows/git
 $releases = Invoke-GhApi "https://api.github.com/repos/git-for-windows/git/releases?per_page=100"
 $candidates = $releases | Where-Object {
-    ($_.tag_name -like "*$simpleVer*") -or ($_.name -like "*$simpleVer*") -or ($_.body -like "*$simpleVer*")
+    ($_.tag_name -like "*$version*") 
 } | Select-Object tag_name, name, published_at, id
 
 if (-not $candidates) {
-    # fallback: show recent releases for manual pick
-    Write-Host "No release matched '$simpleVer'. Listing $RecentCount most recent releases for manual selection..."
-    $recent = $releases | Select-Object tag_name, name, published_at | Select-Object -First $RecentCount
-    $i=0
-    foreach ($r in $recent) {
-        "{0}: {1}  — {2}" -f $i, ($r.tag_name), ($r.published_at)
-        $i++
-    }
-    $sel = Read-Host "Enter index of release to use (or blank to abort)"
-    if ($sel -eq '') { Write-Error "Aborted"; exit 1 }
-    $choice = $recent[$sel]
+    Write-Error "No release matched '$version'. Aborting because selection is restricted to matching releases only."
+    exit 8
 } else {
     if ($candidates.Count -gt 1) {
         Write-Host "Multiple matching releases found:"
@@ -69,7 +56,20 @@ if (-not $candidates) {
             "{0}: {1}  — {2}" -f $i, $c.tag_name, $c.published_at
             $i++
         }
-        $sel = Read-Host "Enter index of release to use"
+        $sel = Read-Host "Enter index of release to use (empty to abort)"
+        if ($sel -eq '') {
+            Write-Host "No selection made; aborting.";
+            exit 1
+        }
+        if ($sel -notmatch '^[0-9]+$') {
+            Write-Error "Invalid selection: must be a numeric index"
+            exit 9
+        }
+        $sel = [int]$sel
+        if ($sel -lt 0 -or $sel -ge $candidates.Count) {
+            Write-Error "Selection out of range"
+            exit 10
+        }
         $choice = $candidates[$sel]
     } else {
         $choice = $candidates[0]
