@@ -4,9 +4,22 @@ param(
 
 Set-StrictMode -Version Latest
 
+# Ensure TLS 1.2 so GitHub API calls succeed under Windows PowerShell 5.x
+try {
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+} catch {
+    # ignore on platforms that don't support ServicePointManager
+}
+
+# normalize version variable (PowerShell is case-insensitive, but be explicit)
+$version = $Version
+
 function Invoke-GhApi {
     param($Uri)
-    $hdr = @{ "User-Agent" = "pacman-for-git-script" }
+    $hdr = @{
+        "User-Agent" = "pacman-for-git-script"
+        "Accept"     = "application/vnd.github.v3+json"
+    }
     return Invoke-RestMethod -Uri $Uri -Headers $hdr -ErrorAction Stop
 }
 
@@ -19,13 +32,14 @@ $VersionsFilename = "package-versions-$Version.txt"
 
 $rawUrl = "https://raw.githubusercontent.com/git-for-windows/build-extra/main/versions/$VersionsFilename"
 try {
-    $content = Invoke-RestMethod -Uri $rawUrl -UseBasicParsing -ErrorAction Stop
+    # use the helper so we don't rely on -UseBasicParsing (not available/necessary in some PS versions)
+    $content = Invoke-GhApi $rawUrl
 } catch {
     Write-Error "Failed to fetch versions file: $rawUrl"
     exit 3
 }
 
-$PackageLine = ($content -split "`n" | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -match '^mingw-w64-x86_64-git\s+' } | Select-Object -First 1)
+$PackageLine = ($content -split '\r?\n' | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -match '^mingw-w64-x86_64-git\s+' } | Select-Object -First 1)
 if (-not $PackageLine) {
     Write-Error "Couldn't find a line starting with 'mingw-w64-x86_64-git' in $VersionsFilename"
     exit 4
@@ -83,7 +97,9 @@ Write-Host "Selected release: $($choice.tag_name) published at $publishedAt (UTC
 
 function Get-LatestCommitBefore {
     param($ownerRepo, $untilIso)
-    $owner, $repo = $ownerRepo -split '/'
+    $parts = $ownerRepo -split '/'
+    $owner = $parts[0]
+    $repo  = $parts[1]
     $api = "https://api.github.com/repos/$owner/$repo/commits?sha=main&until=$([uri]::EscapeDataString($untilIso))&per_page=1"
     $res = Invoke-GhApi $api
     if (-not $res) { return $null }
