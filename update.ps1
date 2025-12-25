@@ -53,7 +53,7 @@ if (-not $candidates) {
         Write-Host "Multiple matching releases found:"
         $i = 0
         foreach ($c in $candidates) {
-            "{0}: {1}  — {2}" -f $i, $c.tag_name, $c.published_at
+            "{0}: {1}  - {2}" -f $i, $c.tag_name, $c.published_at
             $i++
         }
         $sel = Read-Host "Enter index of release to use (empty to abort)"
