@@ -55,9 +55,9 @@ $line32 = "mingw-w64-i686-git $versionLong"
 
 # Find candidate releases in git-for-windows/git
 $releases = Invoke-GhApi "https://api.github.com/repos/git-for-windows/git/releases?per_page=100"
-$candidates = $releases | Where-Object {
+$candidates = @($releases | Where-Object {
     ($_.tag_name -like "*$version*") 
-} | Select-Object tag_name, name, published_at, id
+} | Select-Object tag_name, name, published_at, id)
 
 if (-not $candidates) {
     Write-Error "No release matched '$version'. Aborting because selection is restricted to matching releases only."
@@ -65,26 +65,26 @@ if (-not $candidates) {
 } else {
     if ($candidates.Count -gt 1) {
         Write-Host "Multiple matching releases found:"
-        $i = 0
+        $i = 1
         foreach ($c in $candidates) {
             "{0}: {1}  - {2}" -f $i, $c.tag_name, $c.published_at
             $i++
         }
-        $sel = Read-Host "Enter index of release to use (empty to abort)"
+        $sel = Read-Host "Enter number of release to use (1..$($candidates.Count), empty to abort)"
         if ($sel -eq '') {
             Write-Host "No selection made; aborting.";
             exit 1
         }
         if ($sel -notmatch '^[0-9]+$') {
-            Write-Error "Invalid selection: must be a numeric index"
+            Write-Error "Invalid selection: must be a numeric value"
             exit 9
         }
         $sel = [int]$sel
-        if ($sel -lt 0 -or $sel -ge $candidates.Count) {
+        if ($sel -lt 1 -or $sel -gt $candidates.Count) {
             Write-Error "Selection out of range"
             exit 10
         }
-        $choice = $candidates[$sel]
+        $choice = $candidates[$sel - 1]
     } else {
         $choice = $candidates[0]
     }
