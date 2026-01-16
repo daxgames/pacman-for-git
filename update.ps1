@@ -91,6 +91,16 @@ if (-not $candidates) {
 }
 
 if (-not $choice) { Write-Error "No release selected"; exit 6 }
+# If multiple candidates were presented and the user selected one, prefer the chosen tag
+if ($candidates -and $candidates.Count -gt 1 -and $choice -and $choice.tag_name) {
+    $versionLong = $choice.tag_name.Trim()
+    # Normalize version: remove leading 'v' and strip any '.windows' segments (case-insensitive)
+    if ($versionLong -match '^[vV](.+)') { $versionLong = $Matches[1] }
+    $versionLong = $versionLong -replace '(?i)\.windows', ''
+    $versionLong = $versionLong.Trim()
+    $line64 = "mingw-w64-x86_64-git $versionLong"
+    $line32 = "mingw-w64-i686-git $versionLong"
+}
 
 $publishedAt = (Get-Date $choice.published_at).ToUniversalTime().ToString("o")
 Write-Host "Selected release: $($choice.tag_name) published at $publishedAt (UTC)"
