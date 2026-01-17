@@ -48,7 +48,7 @@ Facilitate installing pacman in [Git for Windows](https://github.com/git-for-win
         ```
 
 2. Add the new entries shown at the bottom of the script output to `version-tags.txt`
-3. Open a Pull Request to `main` to Contribute.
+3. Open a Pull Request to `main` to contribute.
 
 ### The Manual Way
 
