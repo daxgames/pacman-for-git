@@ -76,8 +76,7 @@ Set-StrictMode -Version Latest
 # comment-based help block from the top of this file and print it. This is a
 # guaranteed fallback when `Get-Help` on the host system fails to show the
 # full comment-based help (for example due to encoding/BOM issues or platform
-# quirks). Use `.	hisscript.ps1 -Help` to show the same help text as
-# `Get-Help -Full` would.
+# quirks).
 function Show-HelpRuntime {
     param()
     $scriptPath = $PSCommandPath
