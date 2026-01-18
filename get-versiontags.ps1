@@ -17,6 +17,13 @@ selection when multiple matches are found. Example: `v2`, `2.39` or `2.39.1`.
 When true (default), the script auto-selects the first matching release that has a matching
 versions file. To force the interactive menu, pass `-Latest:$false`.
 
+.PARAMETER All
+When specified, the script will collect all matching releases (those that have a
+corresponding `package-versions-*.txt` file), compute the 64- and 32-bit lines with
+SDK commit SHAs for each release, and print all lines to stdout sorted newest-first
+(most recent release first). The output prints all 64-bit lines first, then an empty
+line, then all 32-bit lines.
+
 .EXAMPLE
 .\get-versiontags
 Displays the latest release hashes available.
@@ -37,18 +44,32 @@ Shows the selection menu showing all 2.39.x releases so a specific release can b
 4  : Package line not found or malformed.
 7  : Failed to find SDK commit SHAs.
 8  : No matching releases with a versions file were found.
+9  : -all was specified and no $env:GITHUB_TOKEN was set.
 
 .NOTES
 This script preserves the existing normalization rules for release tags (leading `v` removed,
 `.windows.1` normalized, and `.windows` removed) to build the versions filename. Avoid changing
 those normalization steps unless you intend to change how versions files are named.
+
+ENVIRONMENT
+- If you set the environment variable `GITHUB_TOKEN` (a personal access token), the script will
+    use it for authenticated GitHub API requests which increases the rate limit (recommended when
+    running `-All` across many releases).
+
+.PARAMETER ThrottleMs
+Milliseconds to wait between GitHub API calls (default: 500). Increase this value if you still
+hit rate limits when using `-All`.
 #>
 
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string] $version,
     [string] $latest = $true,
-    [switch] $Help
+    [switch] $Help,
+    [switch] $All,
+    [int] $ThrottleMs = 0
 )
+
 
 Set-StrictMode -Version Latest
 
@@ -79,18 +100,28 @@ function Show-HelpRuntime {
     }
 }
 
-# If the runtime help switch was provided, show the fallback help and exit.
-if ($Help) {
-    exit (Show-HelpRuntime)
-}
-
 function Invoke-GhApi {
     param($Uri)
     $hdr = @{
         "User-Agent" = "pacman-for-git-update-script"
         "Accept"     = "application/vnd.github.v3+json"
     }
-    return Invoke-RestMethod -Uri $Uri -Headers $hdr -ErrorAction Stop
+    # If the user provided a GITHUB_TOKEN in the environment, use it to raise rate limits.
+    if ($env:GITHUB_TOKEN) {
+        $hdr.Authorization = "token $($env:GITHUB_TOKEN)"
+    }
+
+    try {
+        return Invoke-RestMethod -Uri $Uri -Headers $hdr -ErrorAction Stop
+    } catch {
+        # If the error looks like a rate-limit/403, provide a helpful message.
+        $msg = $_.Exception.Message
+        if ($msg -match 'rate limit' -or $msg -match '403') {
+            Write-Error "GitHub API request failed (possible rate limit)."
+            Write-Error "Consider setting GITHUB_TOKEN or increasing -ThrottleMs. Error: $msg"
+        }
+        throw
+    }
 }
 
 function Get-LatestCommitBefore {
@@ -99,12 +130,116 @@ function Get-LatestCommitBefore {
     $owner = $parts[0]
     $repo  = $parts[1]
     $api = "https://api.github.com/repos/$owner/$repo/commits?sha=main&until=$([uri]::EscapeDataString($untilIso))&per_page=1"
+    if ($ThrottleMs -gt 0) { Start-Sleep -Milliseconds $ThrottleMs }
     $res = Invoke-GhApi $api
     if (-not $res) { return $null }
     return $res[0].sha
 }
 
-# Ensure TLS 1.2 so GitHub API calls succeed under Windows PowerShell 5.x
+# --- Helper functions (reduce duplication) ---
+# Normalize a release tag into a token used for package-versions filenames
+function Normalize-TagToToken {
+    param([string] $tag)
+    if (-not $tag) { return $null }
+    $t = $tag.Trim()
+    if ($t -match '^[vV](.+)') { $t = $Matches[1] }
+    $t = $t -replace '(?i)\.windows\.1', '.windows'
+    $t = $t -replace '(?i)\.windows', ''
+    return $t.Trim()
+}
+
+# Build a package-versions filename from a token
+function Get-VersionsFilenameFromToken {
+    param([string] $token)
+    if (-not $token) { return $null }
+    return "package-versions-$token.txt"
+}
+
+# HEAD-check if a raw versions URL exists (throttles if requested)
+function Test-VersionsFileExists {
+    param([string] $rawUrl)
+    try {
+        if ($ThrottleMs -gt 0) { Start-Sleep -Milliseconds $ThrottleMs }
+        $req = [System.Net.WebRequest]::Create($rawUrl)
+        $req.Method = 'HEAD'
+        $resp = $req.GetResponse()
+        $resp.Close()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Parse the versions file content and return the mingw-w64-x86_64-git version
+function Get-VersionFromVersionsContent {
+    param([string] $content)
+    if (-not $content) { return $null }
+    $PackageLine = ($content -split '\r?\n' | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -match '^mingw-w64-x86_64-git\s+' } | Select-Object -First 1)
+    if (-not $PackageLine) { return $null }
+    $m = [regex]::Match($PackageLine, '^mingw-w64-x86_64-git\s+(.+)$')
+    if (-not $m.Success) { return $null }
+    return $m.Groups[1].Value.Trim()
+}
+
+# Collect an entry for a candidate: returns PSCustomObject {PublishedAt, Line64, Line32} or $null
+function Collect-EntryForCandidate {
+    param([psobject] $c)
+    if (-not $c) { return $null }
+
+    # Determine versions filename
+    if ($c.PSObject.Properties.Match('VersionsFilename')) {
+        $vf = $c.VersionsFilename
+    } else {
+        $token = Normalize-TagToToken $c.tag_name
+        $vf = Get-VersionsFilenameFromToken $token
+    }
+
+    $rawUrl = "https://raw.githubusercontent.com/git-for-windows/build-extra/main/versions/$vf"
+    try {
+        if ($ThrottleMs -gt 0) { Start-Sleep -Milliseconds $ThrottleMs }
+        $content = Invoke-GhApi $rawUrl
+    } catch {
+        Write-Verbose "Collect-Entry: failed to fetch $vf for $($c.tag_name): $($_.Exception.Message)"
+        return $null
+    }
+
+    $ver = Get-VersionFromVersionsContent $content
+    if (-not $ver) { return $null }
+
+    $line64 = "mingw-w64-x86_64-git $ver"
+    $line32 = "mingw-w64-i686-git $ver"
+    $publishedAt = (Get-Date $c.published_at).ToUniversalTime()
+
+    $sha64 = Get-LatestCommitBefore "git-for-windows/git-sdk-64" $publishedAt.ToString("o")
+    $sha32 = Get-LatestCommitBefore "git-for-windows/git-sdk-32" $publishedAt.ToString("o")
+
+    if (-not $sha64 -or -not $sha32) {
+        Write-Verbose "Collect-Entry: failed to find SDK SHAs for $($c.tag_name)"
+        return $null
+    }
+
+    return [pscustomobject]@{
+        PublishedAt = $publishedAt
+        Line64 = "$line64 $sha64"
+        Line32 = "$line32 $sha32"
+    }
+}
+
+# If the runtime help switch was provided, show the fallback help and exit.
+if ($Help) {
+    exit (Show-HelpRuntime)
+}
+
+if ($all) {
+    $latest = 'false'
+    if (!$env:GITHUB_TOKEN) {
+        Write-Error "Set 'GITHUB_TOKEN' in the environment to increase GitHub API rate limits when using '-All'."
+        exit 9
+    }
+
+    write-host "Please wait, gathering data for all releases..."
+}# Ensure TLS 1.2 so GitHub API calls succeed under Windows PowerShell 5.x
+
 try {
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 } catch {
@@ -132,28 +267,19 @@ $choice = $null
 $VersionsFilename = $null
 $candidatesWithVersions = @()
 foreach ($c in $candidates) {
-    $candidateTag = $c.tag_name.Trim()
-    if ($candidateTag -match '^[vV](.+)') { $candidateTag = $Matches[1] }
-    $candidateTag = $candidateTag -replace '(?i)\.windows\.1', '.windows'
-    $candidateTag = $candidateTag -replace '(?i)\.windows', ''
-    $candidateTag = $candidateTag.Trim()
-    $candidateVersionsFilename = "package-versions-$candidateTag.txt"
+    $token = Normalize-TagToToken $c.tag_name
+    $candidateVersionsFilename = Get-VersionsFilenameFromToken $token
     $candidateRawUrl = "https://raw.githubusercontent.com/git-for-windows/build-extra/main/versions/$candidateVersionsFilename"
     try {
-        $req = [System.Net.WebRequest]::Create($candidateRawUrl)
-        $req.Method = 'HEAD'
-        $resp = $req.GetResponse()
-        $resp.Close()
-        # attach the computed filename to the candidate for later use
-        $c | Add-Member -NotePropertyName VersionsFilename -NotePropertyValue $candidateVersionsFilename -Force
+        write-verbose "Checking for '$candidateVersionsFilename' for release '$($c.tag_name)'..."
+        if (Test-VersionsFileExists $candidateRawUrl) {
+            # attach the computed filename to the candidate for later use
+            $c | Add-Member -NotePropertyName VersionsFilename -NotePropertyValue $candidateVersionsFilename -Force
+            $candidatesWithVersions += $c
 
-        $candidatesWithVersions += $c
-
-        if ($latest -eq 'true') {
-            break
+            if ($latest -eq 'true') { break }
         }
     } catch {
-        # skip candidates without a versions file
         continue
     }
 }
@@ -161,6 +287,31 @@ foreach ($c in $candidates) {
 if (-not $candidatesWithVersions) {
     Write-Error "No releases matched '$version' that have a corresponding versions file."
     exit 8
+}
+
+# If requested, gather all entries (64/32 lines) for all candidates and print
+# them to stdout sorted newest-first (most recent release first). 64-bit lines
+# are printed first, then an empty line, then 32-bit lines.
+if ($All) {
+    $entries = @()
+    foreach ($c in $candidatesWithVersions) {
+        $entry = Collect-EntryForCandidate $c
+        if ($entry) { $entries += $entry }
+    }
+
+    if (-not $entries) {
+        Write-Error "No entries collected for -All"
+        exit 8
+    }
+
+    $sorted = $entries | Sort-Object -Property PublishedAt -Descending
+
+    # Print to stdout so callers can redirect output. 64-bit first, then blank, then 32-bit.
+    foreach ($e in $sorted) { Write-Output $e.Line64 }
+    Write-Output ""
+    foreach ($e in $sorted) { Write-Output $e.Line32 }
+
+    exit 0
 }
 
 if ($candidatesWithVersions.Count -eq 1 -or $latest -eq 'true') {
@@ -212,20 +363,19 @@ $VersionsFilename = "package-versions-$selectedVersion.txt"
 $rawUrl = "https://raw.githubusercontent.com/git-for-windows/build-extra/main/versions/$VersionsFilename"
 
 try {
+    if ($ThrottleMs -gt 0) { Start-Sleep -Milliseconds $ThrottleMs }
     $content = Invoke-GhApi $rawUrl
 } catch {
     Write-Error "Failed to fetch versions file: $rawUrl"
     exit 3
 }
 
-$PackageLine = ($content -split '\r?\n' | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -match '^mingw-w64-x86_64-git\s+' } | Select-Object -First 1)
-if (-not ($PackageLine -match '^mingw-w64-x86_64-git\s+(.+)$')) {
+# --- Step 3: Get the version as recorded in the versions file ---
+$versionFromFile = Get-VersionFromVersionsContent $content
+if (-not $versionFromFile) {
     Write-Error "Couldn't find a proper 'mingw-w64-x86_64-git <version>' line in $VersionsFilename"
     exit 4
 }
-
-# --- Step 3: Get the version as recorded in the versions file ---
-$versionFromFile = $Matches[1].Trim()
 
 $line64 = "mingw-w64-x86_64-git $versionFromFile"
 $line32 = "mingw-w64-i686-git $versionFromFile"
