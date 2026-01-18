@@ -1,9 +1,88 @@
+<#
+.SYNOPSIS
+Selects a git-for-windows release and prints pacman version-tag lines with SDK commit SHAs.
+
+.DESCRIPTION
+`get-versiontags` queries the GitHub releases for `git-for-windows`, allows selecting a matching
+release (or auto-selects the latest), looks up the corresponding `package-versions-<version>.txt`
+file from `git-for-windows/build-extra`, extracts the `mingw-w64-x86_64-git` package version,
+finds the SDK commit SHAs as of the release time, and prints two package/version/sha lines.
+
+.PARAMETER Version
+Optional. The release version token to match (substring match against release tag names).
+If omitted the script will search all releases; use `-Latest:$false` to force interactive
+selection when multiple matches are found. Example: `2`, `2.39` or `2.39.1`.
+
+.PARAMETER Latest
+When true (default), the script auto-selects the first matching release that has a matching
+versions file. To force the interactive menu, pass `-Latest:$false`.
+
+.EXAMPLE
+.\get-versiontags
+Displays the latest release hashes available.
+
+.EXAMPLE
+.\get-versiontags -Version 2.39
+Displays the latest 2.39.x release hashes available.
+
+.EXAMPLE
+.\get-versiontags -Version 2.39 -Latest:$false
+Shows the selection menu showing all 2.39.x releases so a specific release can be selected.
+
+.EXITCODE
+0  : Success (or user chose to quit with `q`).
+1  : (reserved)
+2  : Missing or invalid input parameter.
+3  : Failed to fetch versions file.
+4  : Package line not found or malformed.
+7  : Failed to find SDK commit SHAs.
+8  : No matching releases with a versions file were found.
+
+.NOTES
+This script preserves the existing normalization rules for release tags (leading `v` removed,
+`.windows.1` normalized, and `.windows` removed) to build the versions filename. Avoid changing
+those normalization steps unless you intend to change how versions files are named.
+#>
+
 param(
     [string] $version,
-    [string] $latest = $true
+    [string] $latest = $true,
+    [switch] $Help
 )
 
 Set-StrictMode -Version Latest
+
+# Runtime help fallback: if the user requests `-Help` at runtime we extract the
+# comment-based help block from the top of this file and print it. This is a
+# guaranteed fallback when `Get-Help` on the host system fails to show the
+# full comment-based help (for example due to encoding/BOM issues or platform
+# quirks). Use `.	hisscript.ps1 -Help` to show the same help text as
+# `Get-Help -Full` would.
+function Show-HelpRuntime {
+    param()
+    $scriptPath = $PSCommandPath
+    if (-not $scriptPath) { $scriptPath = $MyInvocation.MyCommand.Definition }
+    try {
+        $text = Get-Content -Raw -LiteralPath $scriptPath -ErrorAction Stop
+        if ($text -match '(?s)<#(.*?)#>') {
+            $helpBlock = $Matches[1].Trim()
+            # Print the help block as-is so it matches what comment-based help contains.
+            Write-Host $helpBlock
+            return 0
+        } else {
+            Write-Host "No embedded comment-based help found in $scriptPath"
+            return 2
+        }
+    } catch {
+        Write-Error "Failed to read script for help fallback: $_"
+        return 1
+    }
+}
+
+# If the runtime help switch was provided, show the fallback help and exit.
+if ($Help) {
+    exit (Show-HelpRuntime)
+}
 
 function Invoke-GhApi {
     param($Uri)
