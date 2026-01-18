@@ -13,6 +13,13 @@ See below:
 
 1. Use `get-versiontags [-version <git-version> -latest [true|false]` as shown below:
 
+    - To get hashes for the ALL released versions:
+
+        ```
+        PS C:\src\pacman-for-git>$env:GITHUB_TOKEN = "<your-github-api-token>"
+        PS C:\src\pacman-for-git>./get-versiontags -all >file.txt
+        ```
+
     - To get hashes for the `latest` released version:
     
         ```

@@ -70,7 +70,6 @@ param(
     [int] $ThrottleMs = 0
 )
 
-
 Set-StrictMode -Version Latest
 
 # Runtime help fallback: if the user requests `-Help` at runtime we extract the
