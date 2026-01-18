@@ -11,7 +11,7 @@ finds the SDK commit SHAs as of the release time, and prints two package/version
 .PARAMETER Version
 Optional. The release version token to match (substring match against release tag names).
 If omitted the script will search all releases; use `-Latest:$false` to force interactive
-selection when multiple matches are found. Example: `2`, `2.39` or `2.39.1`.
+selection when multiple matches are found. Example: `v2`, `2.39` or `2.39.1`.
 
 .PARAMETER Latest
 When true (default), the script auto-selects the first matching release that has a matching
