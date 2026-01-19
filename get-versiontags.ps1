@@ -66,7 +66,7 @@ Milliseconds to wait between GitHub API calls (default: 0). Increase this value 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string] $version,
-    [switch] $Latest = $true,
+    [string] $Latest = $true,
     [switch] $Help,
     [switch] $All,
     [int] $ThrottleMs = 0
@@ -197,8 +197,8 @@ function Get-VersionFromVersionsContent {
     return $m.Groups[1].Value.Trim()
 }
 
-function Create-VersionObject{
-    param($ver, $c)
+function Create-VersionObject {
+    param([string] $ver, [psobject] $c)
     if (-not $ver -or -not $c) { return $null }
 
     # --- Step 4: Find the commit SHAs for both SDKs as of the release time ---
@@ -320,7 +320,7 @@ foreach ($c in $candidates) {
             $c | Add-Member -NotePropertyName VersionsFilename -NotePropertyValue $candidateVersionsFilename -Force
             $candidatesWithVersions += $c
 
-            if ($Latest) { break }
+            if ($Latest -eq $true) { break }
         }
     } catch {
         continue
@@ -343,7 +343,7 @@ if ($All) {
     }
 }
 else {
-    if ($candidatesWithVersions.Count -eq 1 -or $Latest) {
+    if ($candidatesWithVersions.Count -eq 1 -or $Latest -eq $true) {
         # pick the only/latest release automatically
         $choice = $candidatesWithVersions[0]
     }
