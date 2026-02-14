@@ -74,6 +74,8 @@ param(
 
 Set-StrictMode -Version Latest
 
+Write-Verbose "Starting script with parameters: Version='$version', Latest=$Latest, All=$All"
+
 # Runtime help fallback: if the user requests `-Help` at runtime we extract the
 # comment-based help block from the top of this file and print it. This is a
 # guaranteed fallback when `Get-Help` on the host system fails to show the
@@ -102,6 +104,7 @@ function Show-HelpRuntime {
 
 function Invoke-GhApi {
     param($Uri)
+    Write-Verbose "GitHub API request: $Uri"
     $hdr = @{
         "User-Agent" = "pacman-for-git-update-script"
         "Accept"     = "application/vnd.github.v3+json"
@@ -126,6 +129,7 @@ function Invoke-GhApi {
 
 function Get-LatestCommitBefore {
     param($ownerRepo, $untilIso)
+    Write-Verbose "Looking for SDK commits before $untilIso in $ownerRepo"
     $parts = $ownerRepo -split '/'
     $owner = $parts[0]
     $repo  = $parts[1]
@@ -145,7 +149,9 @@ function Normalize-TagToVersion {
     if ($t -match '^[vV](.+)') { $t = $Matches[1] }
     $t = $t -replace '(?i)\.windows\.1', '.windows'
     $t = $t -replace '(?i)\.windows', ''
-    return $t.Trim()
+    $normalized = $t.Trim()
+    Write-Verbose "Normalized tag: $tag -> $normalized"
+    return $normalized
 }
 
 # Build a package-versions filename from a Version
@@ -164,8 +170,10 @@ function Test-VersionsFileExists {
         $req.Method = 'HEAD'
         $resp = $req.GetResponse()
         $resp.Close()
+        Write-Verbose "Versions file found: $rawUrl"
         return $true
     } catch {
+        Write-Verbose "Versions file not found: $rawUrl"
         return $false
     }
 }
@@ -189,12 +197,24 @@ function Get-VersionFileContent {
 # Parse the versions file content and return the mingw-w64-x86_64-git version
 function Get-VersionFromVersionsContent {
     param([string] $content)
-    if (-not $content) { return $null }
+    if (-not $content) { 
+        Write-Verbose "No content to parse"
+        return $null 
+    }
     $PackageLine = ($content -split '\r?\n' | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -match '^mingw-w64-x86_64-git\s+' } | Select-Object -First 1)
-    if (-not $PackageLine) { return $null }
+    if (-not $PackageLine) { 
+        Write-Verbose "mingw-w64-x86_64-git package line not found"
+        return $null 
+    }
+    Write-Verbose "Found package line: $PackageLine"
     $m = [regex]::Match($PackageLine, '^mingw-w64-x86_64-git\s+(.+)$')
-    if (-not $m.Success) { return $null }
-    return $m.Groups[1].Value.Trim()
+    if (-not $m.Success) { 
+        Write-Verbose "Failed to parse version from line: $PackageLine"
+        return $null 
+    }
+    $version = $m.Groups[1].Value.Trim()
+    Write-Verbose "Extracted version: $version"
+    return $version
 }
 
 function Create-VersionObject {
@@ -273,6 +293,7 @@ if ($Help) {
 }
 
 if ($all) {
+    Write-Verbose "All flag enabled, processing all candidates"
     $Latest = $false
     if (!$env:GITHUB_TOKEN) {
         Write-Error "Set 'GITHUB_TOKEN' in the environment to increase GitHub API rate limits when using '-All'."
@@ -290,7 +311,9 @@ try {
 }
 
 # --- Step 1: fetch releases and offer selection; exclude 'rc' releases ---
+Write-Verbose "Fetching releases from GitHub API"
 $releases = Invoke-GhApi "https://api.github.com/repos/git-for-windows/git/releases?per_page=100"
+Write-Verbose "Retrieved $($releases.Count) releases, filtering for version '$version'"
 $candidates = @(
     $releases |
     Where-Object {
@@ -299,6 +322,7 @@ $candidates = @(
     } |
     Select-Object tag_name, name, published_at, id
 )
+Write-Verbose "Found $($candidates.Count) matching candidates"
 
 if (-not $candidates) {
     Write-Error "No release matched '$version'. Aborting because selection is restricted to matching releases only."
@@ -306,6 +330,7 @@ if (-not $candidates) {
 }
 
 # Pre-filter candidates by validating that the corresponding versions file exists
+Write-Verbose "Validating candidates have versions files"
 $choice = $null
 $VersionsFilename = $null
 $candidatesWithVersions = @()
@@ -314,13 +339,17 @@ foreach ($c in $candidates) {
     $candidateVersionsFilename = Get-VersionsFilenameFromVersion $selectedVersion
     $candidateRawUrl = "https://raw.githubusercontent.com/git-for-windows/build-extra/main/versions/$candidateVersionsFilename"
     try {
-        write-verbose "Checking for '$candidateVersionsFilename' for release '$($c.tag_name)'..."
+        Write-Verbose "Checking: $candidateVersionsFilename for $($c.tag_name)"
         if (Test-VersionsFileExists $candidateRawUrl) {
             # attach the computed filename to the candidate for later use
             $c | Add-Member -NotePropertyName VersionsFilename -NotePropertyValue $candidateVersionsFilename -Force
             $candidatesWithVersions += $c
+            Write-Verbose "Success: versions file exists for $($c.tag_name)"
 
-            if ($Latest -eq $true) { break }
+            if ($Latest -eq $true) { 
+                Write-Verbose "Latest mode enabled, selecting first match"
+                break 
+            }
         }
     } catch {
         continue
@@ -346,6 +375,7 @@ else {
     if ($candidatesWithVersions.Count -eq 1 -or $Latest -eq $true) {
         # pick the only/latest release automatically
         $choice = $candidatesWithVersions[0]
+        Write-Verbose "Auto-selected release: $($choice.tag_name)"
     }
     else {
         write-host "=-=-=--=-=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=-=-="
@@ -399,3 +429,4 @@ else {
 }
 
 Output-Entries $entries
+Write-Verbose "Script completed successfully"
