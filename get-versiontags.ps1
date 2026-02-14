@@ -74,7 +74,7 @@ param(
 
 Set-StrictMode -Version Latest
 
-Write-Verbose "Starting script with parameters: Version='$version', Latest=$Latest, All=$All"
+Write-Verbose "[START] Version=$version Latest=$Latest All=$All ThrottleMs=$ThrottleMs"
 
 # Runtime help fallback: if the user requests `-Help` at runtime we extract the
 # comment-based help block from the top of this file and print it. This is a
@@ -104,14 +104,18 @@ function Show-HelpRuntime {
 
 function Invoke-GhApi {
     param($Uri)
-    Write-Verbose "GitHub API request: $Uri"
+    Write-Verbose "[API] Uri=$Uri"
     $hdr = @{
         "User-Agent" = "pacman-for-git-update-script"
         "Accept"     = "application/vnd.github.v3+json"
     }
-    # If the user provided a GITHUB_TOKEN in the environment, use it to raise rate limits.
-    if ($env:GITHUB_TOKEN) {
-        $hdr.Authorization = "token $($env:GITHUB_TOKEN)"
+    # Use GITHUB_TOKEN from environment (if pre-existing) or from script variable (if obtained locally)
+    $token = $env:GITHUB_TOKEN
+    if (-not $token -and (Get-Variable -Name GitHubToken -Scope Script -ErrorAction SilentlyContinue)) {
+        $token = $script:GitHubToken
+    }
+    if ($token) {
+        $hdr.Authorization = "token $token"
     }
 
     try {
@@ -129,7 +133,7 @@ function Invoke-GhApi {
 
 function Get-LatestCommitBefore {
     param($ownerRepo, $untilIso)
-    Write-Verbose "Looking for SDK commits before $untilIso in $ownerRepo"
+    Write-Verbose "[SDK] Repo=$ownerRepo UntilTime=$untilIso"
     $parts = $ownerRepo -split '/'
     $owner = $parts[0]
     $repo  = $parts[1]
@@ -150,7 +154,7 @@ function Normalize-TagToVersion {
     $t = $t -replace '(?i)\.windows\.1', '.windows'
     $t = $t -replace '(?i)\.windows', ''
     $normalized = $t.Trim()
-    Write-Verbose "Normalized tag: $tag -> $normalized"
+    Write-Verbose "[TAG] Input=$tag Output=$normalized"
     return $normalized
 }
 
@@ -170,10 +174,10 @@ function Test-VersionsFileExists {
         $req.Method = 'HEAD'
         $resp = $req.GetResponse()
         $resp.Close()
-        Write-Verbose "Versions file found: $rawUrl"
+        Write-Verbose "[FILE] Status=Found Url=$rawUrl"
         return $true
     } catch {
-        Write-Verbose "Versions file not found: $rawUrl"
+        Write-Verbose "[FILE] Status=NotFound Url=$rawUrl"
         return $false
     }
 }
@@ -198,22 +202,22 @@ function Get-VersionFileContent {
 function Get-VersionFromVersionsContent {
     param([string] $content)
     if (-not $content) { 
-        Write-Verbose "No content to parse"
+        Write-Verbose "[PARSE] Content=Empty Result=Null"
         return $null 
     }
     $PackageLine = ($content -split '\r?\n' | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -match '^mingw-w64-x86_64-git\s+' } | Select-Object -First 1)
     if (-not $PackageLine) { 
-        Write-Verbose "mingw-w64-x86_64-git package line not found"
+        Write-Verbose "[PARSE] Package=mingw-w64-x86_64-git Status=NotFound"
         return $null 
     }
-    Write-Verbose "Found package line: $PackageLine"
+    Write-Verbose "[PARSE] PackageLine=$PackageLine"
     $m = [regex]::Match($PackageLine, '^mingw-w64-x86_64-git\s+(.+)$')
     if (-not $m.Success) { 
-        Write-Verbose "Failed to parse version from line: $PackageLine"
-        return $null 
+        Write-Verbose "[PARSE] Status=Failed Line=$PackageLine"
+        return $null
     }
     $version = $m.Groups[1].Value.Trim()
-    Write-Verbose "Extracted version: $version"
+    Write-Verbose "[PARSE] Version=$version Status=Success"
     return $version
 }
 
@@ -247,17 +251,27 @@ function Collect-EntryForCandidate {
     if (-not $c) { return $null }
 
     # Determine versions filename
+    $normalizedTag = $null
     if ($c.PSObject.Properties.Match('VersionsFilename')) {
         $versionsFilename = $c.VersionsFilename
+        $normalizedTag = Normalize-TagToVersion $c.tag_name
     } else {
-        $version = Normalize-TagToVersion $c.tag_name
-        $versionsFilename = Get-VersionsFilenameFromVersion $version
+        $normalizedTag = Normalize-TagToVersion $c.tag_name
+        $versionsFilename = Get-VersionsFilenameFromVersion $normalizedTag
     }
 
     $content = Get-VersionFileContent $versionsFilename
     $ver = Get-VersionFromVersionsContent $content
     if (-not $ver) { return $null }
 
+    # Validate that extracted version matches the normalized tag
+    if (-not $ver.StartsWith($normalizedTag)) {
+        Write-Warning "Invalid package-versions file for tag '$($c.tag_name)': extracted version '$ver' does not match normalized tag '$normalizedTag'. Skipping this release."
+        Write-Verbose "[VALIDATE] Tag=$($c.tag_name) NormalizedTag=$normalizedTag ExtractedVersion=$ver Status=Mismatch"
+        return $null
+    }
+
+    Write-Verbose "[VALIDATE] Tag=$($c.tag_name) NormalizedTag=$normalizedTag ExtractedVersion=$ver Status=Valid"
     return Create-VersionObject $ver $c
 }
 
@@ -293,11 +307,51 @@ if ($Help) {
 }
 
 if ($all) {
-    Write-Verbose "All flag enabled, processing all candidates"
+    Write-Verbose "[FLAG] All=$All Latest=$false (Was=$Latest)"
     $Latest = $false
     if (!$env:GITHUB_TOKEN) {
-        Write-Error "Set 'GITHUB_TOKEN' in the environment to increase GitHub API rate limits when using '-All'."
-        exit 9
+        Write-Host "GitHub API rate limits are strict for unauthenticated requests."
+        Write-Host "Using '-All' flag requires a GitHub personal access token."
+        
+        $token = $null
+        
+        # Try to get token from 'gh' command if available
+        Write-Verbose "[TOKEN] Checking if 'gh' command is available"
+        $ghAvailable = $null -ne (Get-Command gh -ErrorAction SilentlyContinue)
+        
+        if ($ghAvailable) {
+            Write-Verbose "[TOKEN] 'gh' command found, attempting to retrieve token"
+            try {
+                $ghToken = & gh auth token 2>$null
+                if ($ghToken -and -not [string]::IsNullOrWhiteSpace($ghToken)) {
+                    Write-Host "Found GitHub CLI authentication token."
+                    $useGhToken = Read-Host "Use the token from GitHub CLI? (yes/no, default: no)"
+                    if ($useGhToken -match '^(yes|y)$') {
+                        $token = $ghToken
+                        Write-Verbose "[TOKEN] Using token from gh auth token"
+                    }
+                }
+            } catch {
+                Write-Verbose "[TOKEN] Failed to retrieve token from gh: $_"
+            }
+        }
+        
+        # If no token from gh, prompt user
+        if (-not $token) {
+            $secureToken = Read-Host "Enter your GitHub personal access token (or press Enter to abort)" -AsSecureString
+            if ($secureToken.Length -eq 0) {
+                Write-Error "GITHUB_TOKEN is required when using '-All' flag."
+                exit 9
+            }
+            # Convert SecureString to plain text (compatible with all PowerShell versions)
+            $cred = New-Object System.Management.Automation.PSCredential("dummy", $secureToken)
+            $token = $cred.GetNetworkCredential().Password
+            Write-Verbose "[TOKEN] Token set from user input"
+        }
+        
+        # Store token in script variable without setting env variable
+        $script:GitHubToken = $token
+        Write-Verbose "[TOKEN] Token stored for script use (not set as environment variable)"
     }
 
     write-host "Please wait, gathering data for all releases..."
@@ -311,9 +365,9 @@ try {
 }
 
 # --- Step 1: fetch releases and offer selection; exclude 'rc' releases ---
-Write-Verbose "Fetching releases from GitHub API"
+Write-Verbose "[FETCH] Retrieving releases from GitHub API"
 $releases = Invoke-GhApi "https://api.github.com/repos/git-for-windows/git/releases?per_page=100"
-Write-Verbose "Retrieved $($releases.Count) releases, filtering for version '$version'"
+Write-Verbose "[FETCH] Count=$($releases.Count) FilterVersion=$version"
 $candidates = @(
     $releases |
     Where-Object {
@@ -322,7 +376,7 @@ $candidates = @(
     } |
     Select-Object tag_name, name, published_at, id
 )
-Write-Verbose "Found $($candidates.Count) matching candidates"
+Write-Verbose "[FILTER] Candidates=$($candidates.Count) Version=$version"
 
 if (-not $candidates) {
     Write-Error "No release matched '$version'. Aborting because selection is restricted to matching releases only."
@@ -330,7 +384,11 @@ if (-not $candidates) {
 }
 
 # Pre-filter candidates by validating that the corresponding versions file exists
-Write-Verbose "Validating candidates have versions files"
+if ($All -eq $true) {
+    Write-Host  "Checking versions files for $($candidates.Count) candidates"
+} else {
+    Write-Host  "Checking versions files candidates to find the latest valid release (up to $($candidates.Count) candidates)"
+}
 $choice = $null
 $VersionsFilename = $null
 $candidatesWithVersions = @()
@@ -339,17 +397,21 @@ foreach ($c in $candidates) {
     $candidateVersionsFilename = Get-VersionsFilenameFromVersion $selectedVersion
     $candidateRawUrl = "https://raw.githubusercontent.com/git-for-windows/build-extra/main/versions/$candidateVersionsFilename"
     try {
-        Write-Verbose "Checking: $candidateVersionsFilename for $($c.tag_name)"
+        Write-Verbose "[VALIDATE] PRE-FILTER Tag=$($c.tag_name) Filename=$candidateVersionsFilename"
         if (Test-VersionsFileExists $candidateRawUrl) {
             # attach the computed filename to the candidate for later use
             $c | Add-Member -NotePropertyName VersionsFilename -NotePropertyValue $candidateVersionsFilename -Force
-            $candidatesWithVersions += $c
-            Write-Verbose "Success: versions file exists for $($c.tag_name)"
-
-            if ($Latest -eq $true) { 
-                Write-Verbose "Latest mode enabled, selecting first match"
-                break 
+            
+            if ($Latest -eq $true) {
+                if (Collect-EntryForCandidate $c) {
+                    $candidatesWithVersions = @($c)
+                    Write-Host "'$candidateVersionsFilename' exists and matches the release tag for release '$($c.tag_name)'."
+                    Write-host "Found valid 'package-versions' file for release '$($c.tag_name)'. Auto-selecting this release because get latest mode is enabled."
+                    break
+                }
             }
+            $candidatesWithVersions += $c
+            Write-Verbose "[VALIDATE] PRE-FILTER Tag=$($c.tag_name) Status=Found"
         }
     } catch {
         continue
@@ -372,10 +434,29 @@ if ($All) {
     }
 }
 else {
-    if ($candidatesWithVersions.Count -eq 1 -or $Latest -eq $true) {
-        # pick the only/latest release automatically
+    if ($candidatesWithVersions.Count -eq 1) {
+        # pick the only release automatically
         $choice = $candidatesWithVersions[0]
-        Write-Verbose "Auto-selected release: $($choice.tag_name)"
+        Write-Verbose "[SELECT] Mode=Auto Tag=$($choice.tag_name) PublishedAt=$($choice.published_at)"
+        $entry = Collect-EntryForCandidate $choice
+        if ($entry) { $entries += $entry }
+    }
+    elseif ($Latest -eq $true) {
+        # pick the latest valid release (loop through until finding valid entry)
+        Write-Verbose "[SELECT] Mode=Latest searching for valid release"
+        foreach ($candidate in $candidatesWithVersions) {
+            Write-Verbose "[SELECT] Trying candidate Tag=$($candidate.tag_name)"
+            $entry = Collect-EntryForCandidate $candidate
+            if ($entry) {
+                $entries += $entry
+                Write-Verbose "[SELECT] Latest Mode=Valid Tag=$($candidate.tag_name)"
+                break
+            }
+        }
+        if (-not $entries) {
+            Write-Error "No valid package-versions file found for any release matching '$version'."
+            exit 8
+        }
     }
     else {
         write-host "=-=-=--=-=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=-=-="
@@ -407,26 +488,10 @@ else {
             exit 10
         }
         $choice = $candidatesWithVersions[$sel - 1]
+        $entry = Collect-EntryForCandidate $choice
+        if ($entry) { $entries += $entry }
     }
-
-    # Derive a version version from the chosen tag to pick the right versions file name
-    $selectedVersion = $choice.tag_name.Trim()
-    $selectedVersion = Normalize-TagToVersion $selectedVersion
-
-    # --- Step 2: fetch the chosen versions file and parse the package line ---
-    $versionsFilename = Get-VersionsFilenameFromVersion $selectedVersion
-    $content = Get-VersionFileContent $versionsFilename
-
-    # --- Step 3: Get the version as recorded in the versions file ---
-    $versionFromFile = Get-VersionFromVersionsContent $content
-    if (-not $versionFromFile) {
-        Write-Error "Couldn't find a proper 'mingw-w64-x86_64-git <version>' line in $VersionsFilename"
-        exit 4
-    }
-
-    $entry = Collect-EntryForCandidate $choice
-    if ($entry) { $entries += $entry }
 }
 
 Output-Entries $entries
-Write-Verbose "Script completed successfully"
+Write-Verbose "[COMPLETE] TotalEntries=$($entries.Count) ExitCode=0"
