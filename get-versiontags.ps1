@@ -24,6 +24,9 @@ SDK commit SHAs for each release, and print all lines to stdout sorted newest-fi
 (most recent release first). The output prints all 64-bit lines first, then an empty
 line, then all 32-bit lines.
 
+.PARAMETER OutFile
+Optional. If specified, the output will be written to the given file in addition to being printed to stderr.
+
 .EXAMPLE
 .\get-versiontags
 Displays the latest release hashes available.
@@ -61,6 +64,10 @@ ENVIRONMENT
 .PARAMETER ThrottleMs
 Milliseconds to wait between GitHub API calls (default: 0). Increase this value (for example
 500) if you still hit rate limits when using `-All`.
+
+.PARAMETER Y
+When specified with `-All`, automatically uses the GitHub CLI token (if available) without
+prompting. Useful for non-interactive or scripted workflows.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -69,6 +76,8 @@ param(
     [string] $Latest = $true,
     [switch] $Help,
     [switch] $All,
+    [switch] $Y,
+    [string] $OutFile,
     [int] $ThrottleMs = 0
 )
 
@@ -266,8 +275,8 @@ function Collect-EntryForCandidate {
 
     # Validate that extracted version matches the normalized tag
     if (-not $ver.StartsWith($normalizedTag)) {
-        Write-Warning "Invalid package-versions file for tag '$($c.tag_name)': extracted version '$ver' does not match normalized tag '$normalizedTag'. Skipping this release."
-        Write-Verbose "[VALIDATE] Tag=$($c.tag_name) NormalizedTag=$normalizedTag ExtractedVersion=$ver Status=Mismatch"
+        [Console]::Error.WriteLine("`nWarning: Invalid package-versions file for tag '$($c.tag_name)': extracted version '$ver' does not match normalized tag '$normalizedTag'. Skipping this release.`n")
+        write-verbose "[VALIDATE] Tag=$($c.tag_name) NormalizedTag=$normalizedTag ExtractedVersion=$ver Status=Mismatch"
         return $null
     }
 
@@ -282,23 +291,41 @@ function Output-Entries {
     # Sort entries by PublishedAt descending (newest first)
     $sortedEntries = $entries | Sort-Object -Property PublishedAt -Descending
 
-    write-host ""
-    write-output "=-=-=--=-=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=-=-="
-    Write-output "Git Release Version Tags"
-    write-output "=-=-=--=-=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=-=-=`n"
+    [Console]::Error.WriteLine("")
+    [Console]::Error.WriteLine("=-=-=--=-=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=-=-=")
+    [Console]::Error.WriteLine("Git Release Version Tags")
+    [Console]::Error.WriteLine("=-=-=--=-=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=--=-=-=-=-=")
 
-    foreach ($e in $sortedEntries) {
-        Write-output $e.Line64
+
+    if ($OutFile) {
+       # If the output file already exists, clear it before appending new content
+        if (Test-Path -LiteralPath $OutFile) {
+            Clear-Content -LiteralPath $OutFile
+            Write-Verbose "[FILE] Cleared existing output file: $OutFile"
+        }
     }
 
-    Write-Output ""
     foreach ($e in $sortedEntries) {
-        Write-Output $e.Line32
+        [Console]::Error.WriteLine($e.Line64)
+        if ($OutFile) {
+            Add-Content -LiteralPath $OutFile -Value $e.Line64
+        }
     }
 
-    write-Output "`n************************************************************`n"
+    [Console]::Error.WriteLine("")
+    if ($OutFile) {
+        Add-Content -LiteralPath $OutFile -Value ""
+    }
 
-    write-host "Total Entries Output: $($entries.Count * 2) (64-bit and 32-bit lines)"
+    foreach ($e in $sortedEntries) {
+        [Console]::Error.WriteLine($e.Line32)
+        if ($OutFile) {
+            Add-Content -LiteralPath $OutFile -Value $e.Line32
+        }
+    }
+
+    [Console]::Error.WriteLine("`n************************************************************`n")
+    [Console]::Error.WriteLine("Total Entries Output: $($entries.Count * 2) (64-bit and 32-bit lines)")
 }
 
 # If the runtime help switch was provided, show the fallback help and exit.
@@ -310,8 +337,8 @@ if ($all) {
     Write-Verbose "[FLAG] All=$All Latest=$false (Was=$Latest)"
     $Latest = $false
     if (!$env:GITHUB_TOKEN) {
-        Write-Host "GitHub API rate limits are strict for unauthenticated requests."
-        Write-Host "Using '-All' flag requires a GitHub personal access token."
+        [Console]::Error.WriteLine("GitHub API rate limits are strict for unauthenticated requests.")
+        [Console]::Error.WriteLine("Using '-All' flag requires a GitHub personal access token.")
         
         $token = $null
         
@@ -324,11 +351,16 @@ if ($all) {
             try {
                 $ghToken = & gh auth token 2>$null
                 if ($ghToken -and -not [string]::IsNullOrWhiteSpace($ghToken)) {
-                    Write-Host "Found GitHub CLI authentication token."
-                    $useGhToken = Read-Host "Use the token from GitHub CLI? (yes/no, default: no)"
-                    if ($useGhToken -match '^(yes|y)$') {
+                    [Console]::Error.WriteLine("Found GitHub CLI authentication token.")
+                    if ($Y) {
                         $token = $ghToken
-                        Write-Verbose "[TOKEN] Using token from gh auth token"
+                        Write-Verbose "[TOKEN] Using token from gh auth token (auto-accepted via -y)"
+                    } else {
+                        $useGhToken = Read-Host "Use the token from GitHub CLI? (yes/no, default: no)"
+                        if ($useGhToken -match '^(yes|y)$') {
+                            $token = $ghToken
+                            Write-Verbose "[TOKEN] Using token from gh auth token"
+                        }
                     }
                 }
             } catch {
@@ -354,7 +386,7 @@ if ($all) {
         Write-Verbose "[TOKEN] Token stored for script use (not set as environment variable)"
     }
 
-    write-host "Please wait, gathering data for all releases..."
+    [Console]::Error.WriteLine("Please wait, gathering data for all releases...")
 }
 
 # Ensure TLS 1.2 so GitHub API calls succeed under Windows PowerShell 5.x
@@ -385,9 +417,9 @@ if (-not $candidates) {
 
 # Pre-filter candidates by validating that the corresponding versions file exists
 if ($All -eq $true) {
-    Write-Host  "Checking versions files for $($candidates.Count) candidates"
+    [Console]::Error.WriteLine("Checking versions files for $($candidates.Count) candidates")
 } else {
-    Write-Host  "Checking versions files candidates to find the latest valid release (up to $($candidates.Count) candidates)"
+    [Console]::Error.WriteLine("Checking versions files candidates to find the latest valid release (up to $($candidates.Count) candidates)")
 }
 $choice = $null
 $VersionsFilename = $null
