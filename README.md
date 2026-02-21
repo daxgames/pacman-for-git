@@ -7,11 +7,20 @@ Facilitate installing pacman in [Git for Windows](https://github.com/git-for-win
 
 `get-versiontags` will show hashes for the latest released version by default.  Alternatively you can use command line arguments to get a specific version.
 
+Command line help is accessed using `get-versiontags -help`.
+
 The script can also be run from `cmd.exe` and `bash.exe` using the included shim scripts.
 
 See below:
 
 1. Use `get-versiontags [-version <git-version> -latest [true|false]` as shown below:
+
+    - To get hashes for the ALL released versions:
+
+        ```
+        PS C:\src\pacman-for-git>$env:GITHUB_TOKEN = "<your-github-api-token>"
+        PS C:\src\pacman-for-git>./get-versiontags -all >file.txt
+        ```
 
     - To get hashes for the `latest` released version:
     
