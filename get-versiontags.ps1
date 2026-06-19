@@ -326,6 +326,10 @@ function Output-Entries {
 
     [Console]::Error.WriteLine("`n************************************************************`n")
     [Console]::Error.WriteLine("Total Entries Output: $($entries.Count * 2) (64-bit and 32-bit lines)")
+
+    if ($OutFile) {
+        [Console]::Error.WriteLine("Output also written to file: $OutFile")
+    }
 }
 
 # If the runtime help switch was provided, show the fallback help and exit.
